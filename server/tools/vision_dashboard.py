@@ -41,6 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB = Path(__file__).resolve().parent / "web"
 CHAT_DIR = ROOT / "snapshots/chat"  # cwd of the headless Claude runs (chat + object naming) and the object crops
 STARTED = time.time()
+UNKNOWN = {"on": False}  # unknown-object detection + naming by Claude: off unless --unknown (false alarms cost quota)
+NAMER = {"calls": 0, "last": 0.0, "dead": None}  # at most 6 namings, one per minute, none after any error
 STATES = vision.TRACE_DIR / "states.jsonl"
 LIVE = {"table": None, "gripper": None, "info": "starting…", "t": 0.0, "objects": [], "objects_t": 0.0,
         "robot": None, "robot_err": None, "mode": "live"}
@@ -266,6 +268,8 @@ def namer_loop():
     """Claude looks at each new (confirmed) unknown object once and names it."""
     while True:
         time.sleep(1.0)
+        if NAMER["dead"] or NAMER["calls"] >= 6 or time.time() - NAMER["last"] < 60:
+            continue
         with WORLD.lock:
             o = next((o for o in WORLD.objs.values() if not o["known"] and o["name"] is None and not o["naming"]
                       and o["n"] >= 5 and time.time() - o["first"] > 2.0 and o.get("crop") is not None), None)
@@ -277,15 +281,24 @@ def namer_loop():
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(f), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
         name = None
+        NAMER["calls"] += 1
+        NAMER["last"] = time.time()
         try:
             r = _claude([f"Read the image {f.name}. Left: a fixed low-resolution camera's view of a robot's black work mat "
                          "on a desk (the robot arm stands at the back). Right: a zoom on the thing inside the RED box. The "
                          "robot does not know that thing. What is it? Reply with ONLY its name, 1-3 lowercase words.",
                          "--model", "sonnet", "--tools", "Read", "--allowedTools", "Read",
                          "--output-format", "json"], timeout=90)
-            name = (json.loads(r.stdout).get("result") or "").strip().strip(".'\"").lower()[:40] or None
-        except Exception as e:  # leave it unnamed, try again later
-            logging.warning("naming failed: %s", e)
+            res = json.loads(r.stdout)
+            name = (res.get("result") or "").strip().strip(".'\"").lower()
+            # an error or a usage-limit message must never become a "name": stop naming altogether
+            if res.get("is_error") or res.get("subtype") != "success" or not re.fullmatch(r"[a-z][a-z' -]{1,30}", name):
+                NAMER["dead"] = (res.get("result") or "unexpected reply")[:120]
+                name = None
+                logging.warning("object naming stopped: %s", NAMER["dead"])
+        except Exception as e:  # stop naming: never loop on failures (each try costs quota)
+            NAMER["dead"] = str(e)[:120]
+            logging.warning("object naming stopped: %s", e)
         with WORLD.lock:
             o = WORLD.objs.get(oid)
             if o is not None:
@@ -422,7 +435,7 @@ def camera_loop():
                         now = time.time()
                         WORLD.see_known(objs, now)
                         r = LIVE.get("robot")
-                        clear_view = r is not None and r["tip"][1] < 13.0  # folded back (home): not over the mat
+                        clear_view = UNKNOWN["on"] and r is not None and r["tip"][1] < 13.0  # folded back, not over the mat
                         unknown = vision.unknown_objects(imgs["table"], objs) if clear_view else []
                         if clear_view:
                             WORLD.see_unknowns(unknown, now, imgs["table"])
@@ -791,12 +804,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sim", action="store_true", help="SIMULATION: no robot, scripted run (clearly labelled)")
     ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--unknown", action="store_true", help="also track unknown things on the mat and let Claude name "
+                    "them (uses your Claude quota; off by default)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING)
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", a.port)) == 0:
             sys.exit(f"already running on port {a.port}")
     MESHES.update(load_meshes())
+    UNKNOWN["on"] = a.unknown
     threading.Thread(target=story_loop, daemon=True).start()
     threading.Thread(target=namer_loop, daemon=True).start()
     vision.TRACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -840,7 +856,7 @@ def main():
                 seen = [dict(o, x=o["x"] + rng.normal(0, 0.7), y=o["y"] + rng.normal(0, 0.7)) for o in truth]
                 now = time.time()
                 WORLD.see_known(seen, now)
-                if real is not None:
+                if real is not None and UNKNOWN["on"]:
                     WORLD.see_unknowns(vision.unknown_objects(real), now, real)
                 LIVE["objects"], LIVE["objects_t"] = [dict(o, x=round(o["x"], 1), y=round(o["y"], 1)) for o in seen], now
                 SIM_STATE["active"] = "orange ball" if st["phase"] in ("pick",) else "white mug" if st["phase"] in ("measure", "carry", "drop", "verify") else None

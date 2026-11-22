@@ -157,7 +157,8 @@ def table_objects(rgb):
     excl = np.zeros(h.shape, bool)
     for o in found:
         x, y, w, hh = o["box"]
-        excl[max(0, y - 4):y + hh + 4, max(0, x - 4):x + w + 4] = True
+        g = 14 if "mug" in o["label"] else 4  # a mug's handle (the white mug's is RED) sticks out of its box
+        excl[max(0, y - g):y + hh + g, max(0, x - g):x + w + g] = True
     warm = (s > 40) & (v > 110) & ((h <= 22) | (h >= 165)) & inside & ~excl
     warm = cv2.morphologyEx(warm.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
     balls = []
@@ -229,11 +230,37 @@ def ball_off_mat(rgb):
     return None
 
 
-def ball_vs_rim(rgb):
+def ball_vs_circle(rgb, cx, cy, r):
+    """Check from the survey pose when the mug's rim can't be detected (a black mug from above hides its handle):
+    the survey centred the mug at (cx, cy) with radius r px from this very pose, so the mug is still there.
+    'in' = ball colour fills part of that circle or the ball's centre is inside it; 'out' = ball seen clearly outside."""
+    h, s, v = _hsv(rgb)
+    H, W = h.shape
+    inner = np.zeros((H, W), np.uint8)
+    cv2.circle(inner, (int(cx), int(cy)), max(int(0.75 * r), 1), 1, -1)
+    inner = inner > 0
+    warm = (h >= 3) & (h <= 35) & (s >= 25) & (v >= 90)
+    frac = float((warm & inner).sum()) / max(int(inner.sum()), 1)
+    rim = {"cx": float(cx), "cy": float(cy), "diam": float(2 * r), "box": (int(cx - r), int(cy - r), int(2 * r), int(2 * r)),
+           "ball_frac": round(frac, 2)}
+    m = _ball_colour(h, s, v)
+    m[int(0.80 * H):, :] = False
+    m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
+    ball = next(({**b, "diam": float(2 * np.sqrt(b["area"] / np.pi))} for b in _blobs(m, 300, 6000)
+                 if b["area"] / float(b["box"][2] * b["box"][3]) > 0.5), None)
+    if frac > 0.08 or (ball is not None and np.hypot(ball["cx"] - cx, ball["cy"] - cy) < 0.8 * r):
+        return "in", rim, ball
+    if ball is not None and np.hypot(ball["cx"] - cx, ball["cy"] - cy) > 1.2 * r:
+        return "out", rim, ball
+    return None, rim, ball
+
+
+def ball_vs_rim(rgb, kind="white"):
     """Gripper camera looking DOWN at the mug from ~9 cm above the rim after the drop: the whole rim is in view.
     'in' = the ball's centre is inside the rim's ellipse, 'out' = the ball is visible outside it, None = can't tell
     (no rim, or no ball visible: it may be hidden by the mug's wall). Returns (verdict, rim, ball)."""
-    rim = gripper_blob(rgb, "white")
+    H0, W0 = rgb.shape[:2]  # from the survey pose the mug sits near the image centre
+    rim = gripper_blob(rgb, kind, near=(W0 / 2, 0.55 * H0) if kind == "dark" else None)
     h, s, v = _hsv(rgb)
     H, W = h.shape
     m = _ball_colour(h, s, v)
@@ -313,7 +340,7 @@ def gripper_mat_mask(rgb):
     return out > 0
 
 
-def gripper_blob(rgb, kind, big_ok=False):
+def gripper_blob(rgb, kind, big_ok=False, near=None):
     """Best blob of `kind` ('orange' ball, 'white' mug, 'dark' mug) in the gripper camera, only on the mat.
     White mug from above: its inside is shaded (as dark as the mat), only the RIM is a bright ring -> close the ring,
     fit an ellipse, its centre = the opening centre; it must have its RED handle next to it.
@@ -383,9 +410,12 @@ def gripper_blob(rgb, kind, big_ok=False):
                  if c["handle_px"] > 8 and c["area"] > 600]
         if not cands:
             return None
-        b0 = cands[0]
-        x, y, w, hh = b0["box"]
-        b0["cx"], b0["cy"], b0["diam"] = x + w / 2, y + w / 2, float(w)
+        for c in cands:
+            x, y, w, hh = c["box"]
+            c["cx"], c["cy"], c["diam"] = x + w / 2, y + w / 2, float(w)
+        # several dark things can have something white next to them (the jaws, a bag with white print): when we
+        # know roughly where the mug should be in the image, take the candidate closest to that spot
+        b0 = min(cands, key=lambda c: np.hypot(c["cx"] - near[0], c["cy"] - near[1])) if near else cands[0]
         return b0
     # the ball close under the gripper is in its shadow and looks pale (V 118-176, S 26-93, H 5-20) with white
     # stripes: "brighter than the mat + orange hue", then close the gaps the stripes leave

@@ -553,7 +553,8 @@ class Arm:
         lost_n = 0
         for it in range(max_steps):
             img = await self.gripper_image()
-            obj = vision.gripper_blob(img, kind, big_ok=base_cm > 0 and was_near)
+            obj = vision.gripper_blob(img, kind, big_ok=base_cm > 0 and was_near,
+                                      near=(160.0, target_y_far) if kind == "dark" else None)
             z, st = await self.fingertip_z()
             drift = np.linalg.norm(self.fk(st.norm())[0][:2] - start_xy) * 100
             if obj is None:
@@ -590,6 +591,7 @@ class Arm:
             tol = 20 if (descend and z <= stop_z + 0.8) else tol_px
             centred = abs(ex) < tol and abs(ey) < tol
             self.last_servo = (ex, ey, scale)
+            self.last_obj = obj
             if centred and (not descend or z <= stop_z + 0.8):
                 vision.trace("think", f"{label} centred between the jaws ({ex:+.0f},{ey:+.0f} px) at fingertip height "
                              f"{z:.1f} cm → in position ({time.time() - t0:.0f} s)",
@@ -735,7 +737,7 @@ class Arm:
         ty = vision.gripper_axis_target_y(dist)  # where the rim's centre appears when it is ON the gripper's axis
         vision.trace("think", f"the mug's opening is {dist:.1f} cm along the gripper's axis: when the axis goes through "
                      f"the rim's centre, the centre shows up at image row {ty:.0f} (camera model)")
-        self.last_servo = None
+        self.last_servo, self.last_obj, self.survey_view = None, None, None
         ok, msg = await self.servo_over(kind, mug, hover, target_y_far=ty, target_y_near=ty, descend=False,
                                         max_steps=8, size_cm=8.0, tol_px=7, leash_cm=8, lost_back=True)
         st = await self.read()
@@ -751,6 +753,8 @@ class Arm:
             rx, ry = (ex / scale * rgt + -ey / scale * up)[:2]
             ok = True
         xy = (ax + rx, ay + ry)
+        if ok and self.last_obj is not None:  # where the mug sits in the gripper image from this pose (for the check)
+            self.survey_view = (float(self.last_obj["cx"]), float(self.last_obj["cy"]), float(self.last_obj["diam"]) / 2)
         far = np.hypot(xy[0] - m["x"], xy[1] - m["y"])
         if ok and far > 9.0:  # the table camera is never THAT far off mid-mat: the gripper locked on something else
             vision.trace("error", f"gripper camera result ({xy[0]:+.1f}, {xy[1]:.1f}) is {far:.0f} cm from the table "
@@ -817,7 +821,11 @@ class Arm:
         else:
             res = await self.move_tip(delta_cm=[0, 0, 3], orient="free")
         img = await self.gripper_image()
-        g_verdict, rim, gball = vision.ball_vs_rim(img)
+        kind = "white" if mug.startswith("white") else "dark"
+        g_verdict, rim, gball = vision.ball_vs_rim(img, kind)
+        view = getattr(self, "survey_view", None)
+        if view is not None and (kind == "dark" or g_verdict is None):  # the survey showed where the mug is in view
+            g_verdict, rim, gball = vision.ball_vs_circle(img, *view)
         shown = [dict(rim, label=mug)] if rim is not None else []
         if gball is not None:
             shown.append(dict(gball, label="orange ball"))
@@ -983,6 +991,14 @@ class Arm:
             m = getattr(self, "survey_table_estimate", None)
             if m is None:
                 return f"FAILED: {msg}"
+            reach = float(np.hypot(m[0], m[1]))
+            if reach > 36.0:  # the fallback (table camera - 3 cm) is not good enough out there: don't drop blind
+                vision.trace("error", f"the {mug} is {reach:.0f} cm from the arm's base: too far out for the gripper "
+                             "camera to look down at it, and the table camera alone is not precise enough to drop into "
+                             "it. Not picking the ball. Move the mug closer (within ~35 cm).")
+                await self.go_home()
+                return (f"FAILED: the {mug} is {reach:.0f} cm from the arm's base, too far for a reliable drop (the gripper "
+                        "camera can't look down at it). Move it within ~35 cm of the base and run again.")
             xy = (m[0], m[1] - MUG_Y_CORRECTION_CM)
             vision.trace("think", f"{mug} drop point ({msg}): the table camera's ({m[0]:+.1f}, {m[1]:.1f}) minus "
                          f"{MUG_Y_CORRECTION_CM:.0f} cm (it overshoots mugs) = "
