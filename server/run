@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Starts the elrobot MCP server (stdio). Its Python packages come from uv (https://docs.astral.sh/uv/);
+# set ELROBOT_PYTHON to use your own Python instead (it needs numpy, opencv-python and pillow).
+# Nothing may be printed on stdout except MCP messages.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${ELROBOT_PYTHON:-}" ]; then exec "$ELROBOT_PYTHON" "$DIR/tools/elrobot_mcp.py" "$@"; fi
+command -v uv >/dev/null || { echo "elrobot MCP: install uv (https://docs.astral.sh/uv/) or set ELROBOT_PYTHON" >&2; exit 1; }
+exec uv run --quiet --no-project --python ">=3.10" --with numpy --with opencv-python-headless --with pillow \
+     python "$DIR/tools/elrobot_mcp.py" "$@"

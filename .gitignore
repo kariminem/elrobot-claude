@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+snapshots/
+server/snapshots/
+server/config/hardware.env
+.DS_Store

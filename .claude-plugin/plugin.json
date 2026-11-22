@@ -1,0 +1,20 @@
+{
+  "name": "elrobot",
+  "version": "0.2.0",
+  "description": "Let Claude drive a real NormaCore ElRobot arm by looking through its cameras: 16 MCP tools (look, move, camera-guided pick, put the ball in a mug, open the 3D mission control...), safety checks built in, an operator skill and a /elrobot:dashboard command.",
+  "author": {
+    "name": "kariminem",
+    "url": "https://github.com/kariminem"
+  },
+  "homepage": "https://github.com/kariminem/elrobot-claude",
+  "repository": "https://github.com/kariminem/elrobot-claude",
+  "license": "MIT",
+  "keywords": [
+    "robotics",
+    "mcp",
+    "normacore",
+    "elrobot",
+    "robot-arm",
+    "computer-vision"
+  ]
+}

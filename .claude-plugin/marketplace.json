@@ -1,0 +1,16 @@
+{
+  "name": "elrobot",
+  "description": "Claude drives a real NormaCore ElRobot robot arm by looking through its cameras: MCP server + operator skill.",
+  "owner": {
+    "name": "kariminem",
+    "url": "https://github.com/kariminem"
+  },
+  "plugins": [
+    {
+      "name": "elrobot",
+      "source": "./",
+      "description": "Claude drives a real NormaCore ElRobot arm through its cameras (MCP server + operator skill).",
+      "version": "0.2.0"
+    }
+  ]
+}
