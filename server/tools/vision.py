@@ -79,10 +79,21 @@ def _hue_mix(h, s, v, mask):
             "blue": float(((hh > 85) & (hh <= 130)).sum() / n), "n": int(len(hh))}
 
 
-def find_cube(h, s, v, region, min_px=150):
+def mat_levels(h, s, v):
+    """How colourful / bright the bare mat looks in THIS frame (95th percentiles inside the mat). Evening light: S < 40;
+    morning daylight with camera gain: S up to ~120. Thresholds for 'clearly not mat' are set above these."""
+    roi = np.zeros(h.shape, np.uint8)
+    cv2.fillPoly(roi, [MAT_ROI], 1)
+    m = cv2.erode(roi, np.ones((9, 9), np.uint8)) > 0
+    if m.sum() < 500:
+        return 40.0, 60.0
+    return float(np.percentile(s[m], 95)), float(np.percentile(v[m], 95))
+
+
+def find_cube(h, s, v, region, min_px=150, sat_thr=90):
     """Rubik's cube: a compact squarish block of saturated stickers with BLUE/GREEN plus another colour.
     (The ball has no blue/green; the medicine box is mostly white.)"""
-    sat = ((s > 90) & (v > 60) & region).astype(np.uint8)
+    sat = ((s > sat_thr) & (v > 60) & region).astype(np.uint8)
     sat = cv2.morphologyEx(sat, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     best = None
     for b in _blobs(sat > 0, min_px, 20000):
@@ -120,7 +131,8 @@ def table_objects(rgb):
 
     found = []
     inside = roi > 0  # NOTHING outside the mat outline is ever considered
-    cube = find_cube(h, s, v, inside)
+    mat_s, mat_v = mat_levels(h, s, v)
+    cube = find_cube(h, s, v, inside, sat_thr=max(90.0, mat_s + 15))
     if cube is not None:
         x, y, w, hh = cube["box"]
         found.append({"label": "rubiks cube", **cube, "u": x + w / 2, "v": y + hh - 0.25 * w})
@@ -158,7 +170,7 @@ def table_objects(rgb):
         ring = np.ones((y1 - y0, x1 - x0), bool)
         ring[5:5 + hh, 5:5 + w] = False
         rv = v[y0:y1, x0:x1][ring[:v[y0:y1, x0:x1].shape[0], :v[y0:y1, x0:x1].shape[1]]]
-        if len(rv) and (rv < 90).mean() > 0.5:
+        if len(rv) and (rv < max(90.0, mat_v + 5)).mean() > 0.5:  # "dark" = no brighter than the bare mat
             balls.append(b)
     if balls:
         b = balls[0]
@@ -259,7 +271,8 @@ def unknown_objects(rgb, known=None):
     roi = np.zeros((H, W), np.uint8)
     cv2.fillPoly(roi, [MAT_ROI], 1)
     roi = cv2.erode(roi, np.ones((7, 7), np.uint8)) > 0
-    fg = roi & ((v > 80) | (s > 70) | (v < 9))
+    mat_s, mat_v = mat_levels(h, s, v)
+    fg = roi & ((v > max(80.0, mat_v + 25)) | (s > max(70.0, mat_s + 15)) | (v < 9))
     fg = cv2.morphologyEx(fg.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
     for o in (known if known is not None else table_objects(rgb)):

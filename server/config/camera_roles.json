@@ -1,6 +1,7 @@
 {
  "usbvideo/b0a54ec9a90718a28da599d0d6ee470b": "gripper",
- "usbvideo/9ec6b6713ab4d1c721ed57994c2d8923": "table",
+ "usbvideo/9ec6b6713ab4d1c721ed57994c2d8923": "gripper",
  "usbvideo/0c302b1f3f29a813e5ffd2fd064ce0aa": "gripper",
- "usbvideo/700d1e0a5141609345bb792fc648aed3": "table"
+ "usbvideo/700d1e0a5141609345bb792fc648aed3": "table",
+ "usbvideo/8c697f6e0c79a3d2fab2a4ea977ee738": "table"
 }

@@ -66,6 +66,27 @@ def signed(d):
     return ((d + 2048) % 4096) - 2048
 
 
+def station_log() -> Path:
+    """NormaCore Station's log (it names the camera queues of the current session). Our project keeps it next to
+    the code; anywhere else (e.g. the published plugin) it is found through the running Station process, which
+    keeps it open, or ELROBOT_STATION_LOG."""
+    if os.environ.get("ELROBOT_STATION_LOG"):
+        return Path(os.environ["ELROBOT_STATION_LOG"])
+    if (ROOT / "station_data.log").exists():
+        return ROOT / "station_data.log"
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if (proc / "comm").read_text().strip() != "station":
+                continue
+            for fd in (proc / "fd").iterdir():
+                target = os.readlink(fd)
+                if target.endswith(".log"):
+                    return Path(target)
+        except OSError:
+            continue
+    raise RuntimeError("can't find NormaCore Station's log (is Station running?): set ELROBOT_STATION_LOG to its path")
+
+
 def load_env():
     """config/hardware.env, each value overridable from the environment as ELROBOT_<NAME> (e.g.
     ELROBOT_FOLLOWER_SERIAL), so the public MCP package works on other people's arms."""
@@ -218,7 +239,7 @@ class Arm:
         """Latest JPEG of each camera as Station records it -> [(label, jpeg bytes)], gripper camera first.
         Roles come from config/camera_roles.json (Station queue -> 'gripper'/'table'); for unknown queues the
         gripper camera is the one whose bottom strip is black (the gripper body is always in its view)."""
-        log_text = (ROOT / "station_data.log").read_text(errors="replace")
+        log_text = station_log().read_text(errors="replace")
         queues = []
         for q in re.findall(r"queue '/[0-9a-f]+/(usbvideo/[0-9a-f]+)'", log_text):
             if q not in queues:

@@ -10,7 +10,7 @@
       "name": "elrobot",
       "source": "./",
       "description": "Claude drives a real NormaCore ElRobot arm through its cameras (MCP server + operator skill).",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }
