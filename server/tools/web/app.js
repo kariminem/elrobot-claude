@@ -659,17 +659,22 @@ async function loadMcp() {
 }
 
 // ------------------------------------------------------------------------------------------- Ask Claude what's here
-async function pollScan(wasBusy) {
+let scanWasBusy = false, scanMsgUntil = 0;
+async function pollScan() {  // Claude also looks by itself when the scene changes: show what it is doing
   try {
     const r = await api('/api/scan');
     const b = $('#bScan');
-    if (r.busy) { b.textContent = '◆ Claude is looking…'; b.disabled = true; setTimeout(() => pollScan(true), 1000); return; }
-    b.disabled = false;
-    b.textContent = wasBusy ? (r.error ? '◆ scan failed: ' + r.error.slice(0, 40) : `◆ Claude found ${r.found.length} more`) : "◆ Ask Claude what's here";
-    if (wasBusy) setTimeout(() => { b.textContent = "◆ Ask Claude what's here"; }, 6000);
-  } catch (e) { setTimeout(() => pollScan(wasBusy), 1500); }
+    b.disabled = r.busy;
+    if (r.busy) b.textContent = '◆ Claude is looking…';
+    else if (scanWasBusy) { b.textContent = r.error ? '◆ scan failed: ' + r.error.slice(0, 40) : `◆ Claude added ${r.found.length} object${r.found.length === 1 ? '' : 's'}`; scanMsgUntil = Date.now() + 6000; }
+    else if (Date.now() > scanMsgUntil) b.textContent = "◆ Ask Claude what's here";
+    b.title = r.auto && r.auto.on ? `Claude watches the table and looks again when something changes (${r.auto.status}; ${r.auto.calls}/${r.auto.max} looks used)` : 'press to let Claude look at the table';
+    scanWasBusy = r.busy;
+  } catch (e) { /* retry */ }
+  setTimeout(pollScan, 1200);
 }
-$('#bScan').addEventListener('click', async () => { await fetch('/api/scan', { method: 'POST' }); pollScan(true); });
+$('#bScan').addEventListener('click', () => fetch('/api/scan', { method: 'POST' }));
+pollScan();
 
 // ------------------------------------------------------------------------------------------- auto-reload
 let version = null;

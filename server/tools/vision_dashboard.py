@@ -386,6 +386,64 @@ def scan_table():
         SCAN.update(busy=False, t=time.time())
 
 
+AUTO = {"on": True, "calls": 0, "max": 30, "cooldown": 30.0, "last": 0.0, "status": "starting", "change": 0.0}
+
+
+def _thumb(rgb):
+    """Small, smoothed, brightness-normalised grey view of the mat: compares scenes, not light levels."""
+    g = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(rgb, (100, 75), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+                         .astype(np.float32), (5, 5), 0)
+    m = np.zeros((75, 100), np.uint8)
+    cv2.fillPoly(m, [(vision.MAT_ROI * np.array([100 / 320, 75 / 240])).astype(np.int32)], 1)
+    m = cv2.erode(m, np.ones((3, 3), np.uint8)) > 0
+    vals = g[m]
+    return (g - vals.mean()) / (vals.std() + 1e-3), m
+
+
+def auto_scan_loop():
+    """Claude looks at the table by itself when the scene changed: something new appears or goes, the scene has been
+    still for 2.5 s (no hands moving) and the arm is home. Cheap image comparison decides; Claude is only called then
+    (at most one scan per 30 s, 30 per session, none after an error)."""
+    ref = prev = None
+    still_since = None
+    while True:
+        time.sleep(0.5)
+        try:
+            rgb, r, st = LIVE.get("table_rgb"), LIVE.get("robot"), LIVE.get("story") or {}
+            if not AUTO["on"] or rgb is None or SCAN["busy"]:
+                continue
+            arm_home = LIVE["mode"] == "sim" or (r is not None and r["tip"][1] < 13.0)
+            active = time.time() - LIVE.get("last_event_t", 0.0) < 10.0  # a task / chat step happened just now
+            if not arm_home or active:
+                AUTO["status"], prev, still_since = "paused while the arm works", None, None
+                continue
+            t, m = _thumb(rgb)
+            if prev is not None and float(np.abs(t - prev)[m].mean()) > 0.15:
+                still_since = None  # something is moving (hands)
+            elif still_since is None:
+                still_since = time.time()
+            prev = t
+            if still_since is None or time.time() - still_since < 2.5:
+                AUTO["status"] = "scene moving, waiting until it is still"
+                continue
+            AUTO["change"] = round(float((np.abs(t - ref)[m] > 0.8).mean()), 4) if ref is not None else 1.0
+            if AUTO["change"] < 0.004:
+                AUTO["status"] = "watching the table"
+                continue
+            if SCAN["error"] or AUTO["calls"] >= AUTO["max"]:
+                AUTO["status"] = "stopped: " + (SCAN["error"] or f"{AUTO['max']} scans used")
+                continue
+            if time.time() - AUTO["last"] < AUTO["cooldown"]:
+                AUTO["status"] = "something changed: next look in a few seconds"
+                continue
+            AUTO.update(calls=AUTO["calls"] + 1, last=time.time(), status="something changed: Claude is looking")
+            SCAN.update(busy=True, error=None)
+            scan_table()
+            ref = t
+        except Exception as e:  # keep watching
+            AUTO["status"] = f"watch error: {e}"
+
+
 CHAT = {"msgs": [], "busy": False, "session": None, "model": "sonnet", "proc": None, "n": 0}
 CHAT_LOCK = threading.Lock()
 CHAT_PROMPT = (
@@ -832,7 +890,8 @@ class Handler(BaseHTTPRequestHandler):
             cfg = json.loads(mcp_config().read_text())
             return self.js({"tools": elrobot_mcp.TOOLS, "instructions": elrobot_mcp.INSTRUCTIONS, "config": cfg})
         if p == "/api/scan":
-            return self.js({k: SCAN[k] for k in ("busy", "error", "t", "found")})
+            return self.js({**{k: SCAN[k] for k in ("busy", "error", "t", "found")},
+                            "auto": {k: AUTO[k] for k in ("on", "calls", "max", "status", "change")}})
         if p == "/api/version":  # the page reloads itself when this changes (page files edited / server restarted)
             v = max([STARTED] + [f.stat().st_mtime for f in WEB.glob("*") if f.is_file()])
             return self.js({"v": v})
@@ -867,6 +926,7 @@ def story_loop():
                     done.add(e["t"])
                     WORLD.measured(d["label"], d["table"], d["measured"])
             st = story(evs)
+            LIVE["last_event_t"] = max((e["t"] for e in evs[-5:]), default=0.0)
             r = LIVE.get("robot")
             if st["held"] and r is not None and r["gripper"] > 70:  # the jaws are open: nothing is held, whatever the log says
                 st["held"] = None
@@ -880,6 +940,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sim", action="store_true", help="SIMULATION: no robot, scripted run (clearly labelled)")
     ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--no-autoscan", action="store_true", help="don't let Claude look at the table by itself when "
+                    "the scene changes (the 'Ask Claude' button still works)")
     ap.add_argument("--unknown", action="store_true", help="also track unknown things on the mat and let Claude name "
                     "them (uses your Claude quota; off by default)")
     a = ap.parse_args()
@@ -889,6 +951,8 @@ def main():
             sys.exit(f"already running on port {a.port}")
     MESHES.update(load_meshes())
     UNKNOWN["on"] = a.unknown
+    AUTO["on"] = not a.no_autoscan
+    threading.Thread(target=auto_scan_loop, daemon=True).start()
     threading.Thread(target=story_loop, daemon=True).start()
     threading.Thread(target=namer_loop, daemon=True).start()
     vision.TRACE_DIR.mkdir(parents=True, exist_ok=True)
