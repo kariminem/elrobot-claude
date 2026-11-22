@@ -108,6 +108,8 @@ footer button{background:var(--panel);color:var(--muted);border:1px solid var(--
 #view.names .lbl small,#view.names .lbl.dist,#view.names .lbl.axis{display:none}
 #view.nolabels .labels{display:none}
 .hide{display:none!important}
+#bStop{background:#c62828;color:#fff;border:0;border-radius:9px;padding:7px 14px;font-weight:900;letter-spacing:.6px;cursor:pointer;
+  box-shadow:0 0 14px rgba(255,60,60,.45)}#bStop:active{transform:scale(.96)}
 #bClaude{margin-left:8px;background:linear-gradient(135deg,#d97757,#b85c3e);color:#fff;border:0;border-radius:9px;padding:7px 13px;
   font-weight:800;letter-spacing:.3px;cursor:pointer;box-shadow:0 0 18px rgba(217,119,87,.35)}
 #bClaude i{font-style:normal;background:#fff;color:#b85c3e;border-radius:9px;padding:0 6px;margin-left:6px;font-size:11px;display:none}
@@ -175,6 +177,7 @@ body.drawer #drawer{transform:none}
   <span id="pTorque" class="pill"><i></i>TORQUE</span>
   <div class="task"><span id="taskName" style="color:var(--muted)">idle</span><span id="phaseChip">idle</span>
     <span id="verdict"></span><span id="timer">00:00.0</span>
+    <button id="bStop" title="Stop everything and freeze the arm where it is">■ STOP</button>
     <button id="bClaude" title="Chat with Claude, who drives the arm through the elrobot MCP tools">◆ Claude · MCP<i id="chatBadge">•</i></button></div>
 </header>
 <main>

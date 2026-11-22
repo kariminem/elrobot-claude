@@ -528,14 +528,60 @@ def chat_reader(p):
         CHAT["busy"], CHAT["proc"] = False, None
 
 
+def _descendants(pid):
+    """Every process started (directly or not) by pid: the chat's Claude starts its MCP server as a child process."""
+    kids = {}
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            kids.setdefault(int((d / "stat").read_text().rsplit(")", 1)[1].split()[1]), []).append(int(d.name))
+        except (OSError, ValueError, IndexError):
+            pass
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def _freeze_arm():
+    """Goal = where every joint is right now: the arm stops moving and holds (the gripper keeps its grip)."""
+    async def go():
+        arm = arm_control.Arm()
+        await arm.connect()
+        await arm.hold()
+    try:
+        asyncio.run(go())
+        return True
+    except Exception as e:
+        logging.warning("freeze failed: %s", e)
+        return False
+
+
 def chat_stop():
+    """STOP: kill the chat's Claude and everything it started (its MCP server, mid-move), any ./tools/arm task, then
+    freeze the arm where it is. Leaves other Claude sessions' MCP servers alone."""
+    pids = []
     p = CHAT.get("proc")
     if p is not None and p.poll() is None:
+        pids += _descendants(p.pid) + [p.pid]
+    for d in Path("/proc").glob("[0-9]*"):  # tasks started from the terminal (./tools/arm mug ...)
         try:
-            os.killpg(p.pid, signal.SIGTERM)
+            if "tools/arm_control.py" in (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace"):
+                pids.append(int(d.name))
+        except OSError:
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        chat_add("system", "stopped by you: no further moves are sent (the arm finishes its current small move and holds)")
+    frozen = _freeze_arm()
+    _emit("error", "STOP pressed: " + ("arm frozen where it is" if frozen else "could NOT reach the arm to freeze it")
+          + (f", {len(pids)} running process(es) stopped" if pids else ""))
+    chat_add("system", "■ STOP: " + ("the arm is frozen where it is" if frozen else "could not reach the arm: use the power switch")
+             + (" and Claude was stopped" if p is not None and pids else ""))
+    return frozen
 
 
 def camera_loop():
@@ -834,6 +880,8 @@ class Handler(BaseHTTPRequestHandler):
                 CHAT["model"] = body["model"]
                 chat_add("system", f"model: {CHAT['model']}")
             return self.js({"ok": True})
+        if self.path == "/api/stop":
+            return self.js({"ok": chat_stop()})
         if self.path == "/api/scan":
             if not SCAN["busy"]:
                 SCAN.update(busy=True, error=None)

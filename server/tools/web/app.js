@@ -641,7 +641,14 @@ async function sendChat(text) {
 $('#chatForm').addEventListener('submit', (e) => { e.preventDefault(); sendChat($('#chatIn').value); });
 $('#chatIn').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat($('#chatIn').value); } });
 document.querySelectorAll('#chips button').forEach((b) => b.addEventListener('click', () => sendChat(b.textContent)));
-$('#chatStop').addEventListener('click', () => post('/api/chat/stop'));
+async function stopAll(btn) {
+  const old = btn.textContent; btn.textContent = '■ stopping…';
+  try { const r = await post('/api/stop'); btn.textContent = r.ok ? '■ STOPPED' : '■ use the power switch!'; }
+  catch (e) { btn.textContent = '■ use the power switch!'; }
+  setTimeout(() => { btn.textContent = old; }, 4000);
+}
+$('#chatStop').addEventListener('click', (e) => stopAll(e.currentTarget));
+$('#bStop').addEventListener('click', (e) => stopAll(e.currentTarget));
 $('#chatNew').addEventListener('click', () => post('/api/chat/new'));
 $('#chatModel').addEventListener('change', (e) => post('/api/chat/model', { model: e.target.value }));
 async function loadMcp() {

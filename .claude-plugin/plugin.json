@@ -1,6 +1,6 @@
 {
   "name": "elrobot",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Let Claude drive a real NormaCore ElRobot arm by looking through its cameras: 16 MCP tools (look, move, camera-guided pick, put the ball in a mug, open the 3D mission control...), safety checks built in, an operator skill and a /elrobot:dashboard command.",
   "author": {
     "name": "kariminem",
