@@ -161,8 +161,11 @@ def table_objects(rgb):
     warm = (s > 40) & (v > 110) & ((h <= 22) | (h >= 165)) & inside & ~excl
     warm = cv2.morphologyEx(warm.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
     balls = []
+    H_, W_ = h.shape
     for b in _blobs(warm, 30, 900):
         x, y, w, hh = b["box"]
+        if x <= 2 or x + w >= W_ - 2 or y + hh >= H_ - 2:  # cut off by the image border: a cable / plug, not the ball
+            continue
         if not (0.55 < w / max(hh, 1) < 1.8 and b["area"] / float(w * hh) > 0.45):
             continue
         # a ball lies on the DARK mat: the ring around it is mostly dark. Orange print on a white box is not a ball.
@@ -296,7 +299,7 @@ def unknown_objects(rgb, known=None):
 def gripper_mat_mask(rgb):
     """Region of the gripper image covered by the mat: the convex hull of ALL mat-coloured patches (dark grey,
     unsaturated; a big object in view splits the mat into several). Objects count only if their CENTRE is inside."""
-    h, s, v = _hsv(rgb)
+    h, s, v = _hsv(cv2.medianBlur(rgb, 7))  # daylight shows the mat's white speckle: smooth it into one surface
     mat = ((v < 115) & (s < 35)).astype(np.uint8)
     mat[int(0.80 * mat.shape[0]):, :] = 0
     mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
@@ -400,7 +403,14 @@ def gripper_blob(rgb, kind, big_ok=False):
         if big_close:  # (it also hides the mat, so the on-mat test can't apply)
             blobs.append(bl)
             continue
-        if not touches_edge and compact and on_mat[min(int(bl["cy"]), H - 1), int(bl["cx"])]:
+        # close under the jaws the ball hides the mat around it: a big, solid, round blob away from the image edges
+        # is the ball even if its centre is not on the mat (wood / background always enter from an edge)
+        cut = y + hh >= bottom - 2  # at grasp height the jaws' mask cuts the ball's lower part off: it looks flat
+        close_ball = (bl["area"] > 0.03 * mask.size and bl["area"] / float(w * hh) > 0.6
+                      and 0.6 < w / max(hh, 1) < (2.4 if cut else 1.6)
+                      and np.median(s[y:y + hh, x:x + w][mask[y:y + hh, x:x + w]]) > 80)  # the ball S ~135, wood ~53
+        colourful = np.median(s[y:y + hh, x:x + w][mask[y:y + hh, x:x + w]]) > 35  # not a faint warm tint (mug inside: 22)
+        if not touches_edge and compact and colourful and (on_mat[min(int(bl["cy"]), H - 1), int(bl["cx"])] or close_ball):
             blobs.append(bl)
     if not blobs:
         return None
