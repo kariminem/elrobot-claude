@@ -317,12 +317,21 @@ function updateUnknowns(world) {
       u = UNK[w.id] = { g, box, edges, l, target: new THREE.Vector3(w.x, w.y, 0) };
       g.position.copy(u.target);
     }
-    const h = 2.5;
-    for (const m of [u.box, u.edges]) { m.scale.set(Math.max(w.w_cm, 1.5), Math.max(w.d_cm, 1.5), h); m.position.z = h / 2; }
+    const vessel = /mug|cup|glass|bowl|jar|vase/.test(w.name || '');
+    if (vessel && !u.glass) {  // a cup / glass named by Claude: draw a glass cylinder instead of a box
+      u.box.visible = u.edges.visible = false;
+      u.glass = new THREE.Mesh(new THREE.CylinderGeometry(1, 0.9, 1, 40, 1, true),
+        new THREE.MeshStandardMaterial({ color: 0xcfe8ff, transparent: true, opacity: 0.32, roughness: 0.05, metalness: 0.1, side: THREE.DoubleSide }));
+      u.glass.rotation.x = Math.PI / 2;
+      u.g.add(u.glass);
+    }
+    const h = vessel ? 9.5 : 2.5;
+    if (u.glass) { const r = Math.max(Math.min(w.w_cm, w.d_cm, 12) / 2, 3); u.glass.scale.set(r, h, r); u.glass.position.z = h / 2; }
+    else for (const m of [u.box, u.edges]) { m.scale.set(Math.max(w.w_cm, 1.5), Math.max(w.d_cm, 1.5), h); m.position.z = h / 2; }
     u.l.position.set(0, 0, h + 3);
     u.target.set(w.x, w.y, 0);
     u.l.element.innerHTML = (w.name ? esc(w.name) : 'new object') +
-      `<small>${w.by_user ? 'named by you' : w.name ? "Claude's guess · click to correct" : w.naming ? 'Claude is looking at it…' : 'unknown, waiting for Claude'} · (${fmt(w.x)}, ${w.y.toFixed(1)}) cm</small>`;
+      `<small>${w.by_user ? 'named by you' : w.src === 'claude' ? 'seen by Claude' : w.name ? "Claude's guess · click to correct" : w.naming ? 'Claude is looking at it…' : 'unknown, waiting for Claude'} · (${fmt(w.x)}, ${w.y.toFixed(1)}) cm</small>`;
     u.l.element.dataset.id = w.id;
   }
   for (const id of Object.keys(UNK)) if (!live.has(id)) { scene.remove(UNK[id].g); delete UNK[id]; }
@@ -338,7 +347,9 @@ function updateObjects() {
     const mugName = st.release && (st.release.label || 'white mug');
     const mug = mugName ? objXY(mugName) : null;
     const bounced = seenNow && mug && Math.hypot(d.xy[0] - mug.xy[0], d.xy[1] - mug.xy[1]) > 6;  // on the mat after the drop
-    if (name === 'orange ball' && st.held) { state = 'held'; text = 'held in the gripper'; }
+    // the camera wins: a ball the table camera sees on the mat, away from the fingertips, is not in the gripper
+    const awayFromTip = seenNow && tip.p1 && Math.hypot(d.xy[0] - tip.cur.x, d.xy[1] - tip.cur.y) > 6;
+    if (name === 'orange ball' && st.held && !awayFromTip) { state = 'held'; text = 'held in the gripper'; }
     else if (name === 'orange ball' && st.release && mug && !bounced && !(st.t_end && seenNow) && st.verdict !== 'MISSED') {
       // released over the mug: it is in there (or falling in) unless a camera sees it somewhere else
       setTarget(o, mug.xy[0], mug.xy[1], 0.3); state = 'inmug';
@@ -646,6 +657,19 @@ async function loadMcp() {
     }).join('');
   } catch (e) { /* retry on next open */ }
 }
+
+// ------------------------------------------------------------------------------------------- Ask Claude what's here
+async function pollScan(wasBusy) {
+  try {
+    const r = await api('/api/scan');
+    const b = $('#bScan');
+    if (r.busy) { b.textContent = '◆ Claude is looking…'; b.disabled = true; setTimeout(() => pollScan(true), 1000); return; }
+    b.disabled = false;
+    b.textContent = wasBusy ? (r.error ? '◆ scan failed: ' + r.error.slice(0, 40) : `◆ Claude found ${r.found.length} more`) : "◆ Ask Claude what's here";
+    if (wasBusy) setTimeout(() => { b.textContent = "◆ Ask Claude what's here"; }, 6000);
+  } catch (e) { setTimeout(() => pollScan(wasBusy), 1500); }
+}
+$('#bScan').addEventListener('click', async () => { await fetch('/api/scan', { method: 'POST' }); pollScan(true); });
 
 // ------------------------------------------------------------------------------------------- auto-reload
 let version = null;

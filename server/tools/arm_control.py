@@ -858,6 +858,36 @@ class Arm:
                      vision.annotate(timg, objs, title="after the drop: UNSURE", outline=True))
         return f"UNSURE: the ball is not seen inside the {mug} ({why}), nor on the mat or desk. Look before trusting it."
 
+    async def place_at(self, x_cm: float, y_cm: float) -> str:
+        """Carry the held object to (x, y) cm, lower it until it almost touches the table, open, lift 6 cm."""
+        t0 = time.time()
+        hold = getattr(self, "held_grasp_height", None) or 2.5
+        vision.trace("think", f"place the held object at ({x_cm:+.1f}, {y_cm:.1f}) cm: carry it high, lower it to "
+                     f"{hold + 0.5:.1f} cm (it almost touches the table), then open")
+        z_now, _ = await self.fingertip_z()
+        if z_now < 14.0:
+            await self.move_tip(delta_cm=[0, 0, min(14.0 - z_now, 12.0)], orient="free", max_cm=15)
+        res = await self.move_tip(target_cm=[x_cm, y_cm, max(z_now, 14.0)], orient="free", max_cm=45)
+        place_z = hold + 0.5
+        if not res.startswith(("REFUSED", "STOPPED")):
+            res = await self.move_tip(target_cm=[x_cm, y_cm, place_z], orient="down", max_cm=20)
+            if res.startswith(("REFUSED", "STOPPED")):
+                res = await self.move_tip(target_cm=[x_cm, y_cm, place_z], orient="free", max_cm=20)
+        if res.startswith(("REFUSED", "STOPPED")):
+            vision.trace("error", "can't place it there: " + res.splitlines()[0])
+            return "PLACE ABORTED: " + res.splitlines()[0]
+        st = await self.read()
+        p = self.fk(st.norm())[0] * 100
+        await self.set_gripper(100)
+        vision.trace("gripper", f"OPEN: object set down at ({p[0]:+.1f}, {p[1]:.1f}) cm", vision.annotate(await self.gripper_image(),
+                     title="placed"), data={"type": "release", "label": "place", "tip": [round(float(p[0]), 1),
+                     round(float(p[1]), 1), round(float(p[2] - self.geo.desk_z * 100), 1)], "target": [x_cm, y_cm]})
+        await asyncio.sleep(0.5)
+        await self.move_tip(delta_cm=[0, 0, 6], orient="free")
+        self.held_grasp_height = None
+        return (f"PLACED at ({p[0]:+.1f}, {p[1]:.1f}) cm in {time.time() - t0:.0f} s. Call look to verify.\n"
+                + self.describe(await self.read()))
+
     async def put_ball_on(self, target: str = "rubiks cube", target_height_cm: float = 5.7) -> str:
         """Put the orange ball ON TOP of an object, using BOTH cameras: the table camera gives the rough position,
         the gripper camera (pointing straight down above it) confirms and corrects it before setting the ball down."""

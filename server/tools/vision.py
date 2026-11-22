@@ -138,7 +138,10 @@ def table_objects(rgb):
         found.append({"label": "rubiks cube", **cube, "u": x + w / 2, "v": y + hh - 0.25 * w})
     red = ((h <= 8) | (h >= 165)) & (s > 80) & (v > 40) & inside
     white = (s < 50) & (v > 65) & (v < 240) & inside
-    dark = (v < 14) & inside
+    roi_e = cv2.erode(roi, np.ones((9, 9), np.uint8)) > 0  # black = clearly darker than this frame's mat
+    mv = v[roi_e] if roi_e.sum() > 500 else np.array([60.0])
+    dark_thr = max(14.0, min(0.45 * float(np.percentile(mv, 50)), 0.8 * float(np.percentile(mv, 5))))
+    dark = (v < dark_thr) & inside
     for label, body, handle in (("white mug", white, red), ("black mug", dark, white)):
         cands = _mug_candidates(rgb, body, handle, on_mat)
         if label == "white mug":
@@ -151,6 +154,10 @@ def table_objects(rgb):
             b = cands[0]
             x, y, w, hh = b["box"]
             # a cylinder standing on the table: its base centre is a quarter of its width above the lowest pixel
+            # a mug seen from here is about as tall as it is wide: a much taller box means the dark mat's front strip
+            # merged with the black mug's body below it -> measure from the top of the box
+            hh = min(hh, int(1.3 * w))
+            b = {**b, "box": (x, y, w, hh)}
             found.append({"label": label, **b, "u": x + w / 2, "v": y + hh - 0.25 * w})
     # the ball LAST: warm colours (peach/orange/red band), roundish, and NOT part of the cube or touching a mug
     # (the cube's orange stickers and the white mug's red handle are warm too)

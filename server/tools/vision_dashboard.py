@@ -211,8 +211,20 @@ class World:
                     "src": "table", "seen": t, "first": t, "n": 1, "w_cm": b["w_cm"], "d_cm": b["d_cm"], "name": None,
                     "naming": False, "crop": _context(rgb, b["box"]), "hist": deque([(b["x"], b["y"])], maxlen=12)}
             # called only while the arm is out of the camera's way: an unknown not seen for 8 s has been taken away
-            for k in [k for k, o in self.objs.items() if not o["known"] and t - o["seen"] > 8]:
+            for k in [k for k, o in self.objs.items() if not o["known"] and o["src"] != "claude" and t - o["seen"] > 8]:
                 del self.objs[k]
+
+    def set_claude_objects(self, items):
+        """Replace the objects from the last 'Ask Claude' scan (they stay until the next scan)."""
+        with self.lock:
+            for k in [k for k, o in self.objs.items() if o["src"] == "claude"]:
+                del self.objs[k]
+            t = time.time()
+            for i, it in enumerate(items):
+                self.objs[f"c{i}"] = {"id": f"c{i}", "label": None, "known": False, "x": it["x"], "y": it["y"], "z": 0.0,
+                                      "on": None, "src": "claude", "seen": t, "first": t, "n": 99, "w_cm": it["w_cm"],
+                                      "d_cm": it["d_cm"], "name": it["name"], "naming": False, "crop": None,
+                                      "hist": deque([(it["x"], it["y"])], maxlen=12)}
 
     def snapshot(self):
         now = time.time()
@@ -225,7 +237,7 @@ class World:
                     d["table_said"] = [round(v, 1) for v in o["table_said"]]
                 if not o["known"]:
                     d.update(w_cm=round(o["w_cm"], 1), d_cm=round(o["d_cm"], 1),
-                             confirmed=o["n"] >= 5 and now - o["first"] > 2.0)
+                             confirmed=o["src"] == "claude" or (o["n"] >= 5 and now - o["first"] > 2.0))
                 out.append(d)
             return out
 
@@ -320,6 +332,58 @@ def mcp_config():
     g.write_text(json.dumps({"mcpServers": {"elrobot": {"command": sys.executable,
                                                          "args": [str(ROOT / "tools/elrobot_mcp.py")]}}}, indent=2))
     return g
+
+
+SCAN = {"busy": False, "error": None, "t": 0.0, "found": []}
+KNOWN_NAMES = ("orange ball", "white mug", "black mug", "rubiks cube", "rubik's cube")
+
+
+def scan_table():
+    """'Ask Claude what's here': Claude looks at the table camera once and lists everything on the mat (also what the
+    colour rules can't see, like a clear glass mug). Items on top of / next to a tracked object are parts of it."""
+    try:
+        rgb = LIVE.get("table_rgb")
+        if rgb is None:
+            raise RuntimeError("no table camera frame yet")
+        CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        f = CHAT_DIR / "table_scan.jpg"
+        big = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        cv2.imwrite(str(f), big)
+        H, W = big.shape[:2]
+        r = _claude([f"Read the image {f.name} ({W}x{H} px): a fixed camera looking at a robot arm's black work mat. "
+                     "List every object lying or standing ON the mat. Ignore the arm, the wall, cables and anything off "
+                     "the mat. A mug's handle is part of the mug: never list a handle on its own. Reply with ONLY a JSON "
+                     'array, one item per object: {"name": short lowercase name, "box": [x0, y0, x1, y1] in pixels of '
+                     'this image, "base": [x, y] pixel where the object touches the mat}.',
+                     "--model", "sonnet", "--tools", "Read", "--allowedTools", "Read", "--output-format", "json"], timeout=120)
+        res = json.loads(r.stdout)
+        if res.get("is_error") or res.get("subtype") != "success":
+            raise RuntimeError((res.get("result") or "Claude did not answer")[:160])
+        txt = res.get("result") or ""
+        items = json.loads(txt[txt.index("["):txt.rindex("]") + 1])
+        known = [o for o in WORLD.snapshot() if o["known"]]
+        out = []
+        for it in items:
+            name = str(it.get("name", "")).strip().lower()[:40]
+            (x0, y0, x1, y1), (bu, bv) = it["box"], it["base"]
+            x, y = (float(c) for c in vision.px_to_cm(bu / 2, bv / 2))
+            if not name or any(k in name for k in KNOWN_NAMES):
+                continue  # the colour detectors already track these, precisely
+            if any(np.hypot(x - o["x"], y - o["y"]) < (7.0 if "mug" in o["label"] else 4.0) for o in known):
+                continue  # a part of a tracked object (a handle, a sticker)
+            w_cm = float(np.hypot(*np.subtract(vision.px_to_cm(x0 / 2, y1 / 2), vision.px_to_cm(x1 / 2, y1 / 2))))
+            d_cm = float(np.hypot(*np.subtract(vision.px_to_cm(bu / 2, y0 / 2), vision.px_to_cm(bu / 2, y1 / 2))))
+            out.append({"name": name, "x": x, "y": y, "w_cm": min(max(w_cm, 2.0), 25.0), "d_cm": min(max(d_cm, 2.0), 25.0)})
+        WORLD.set_claude_objects(out)
+        SCAN.update(found=[o["name"] for o in out], error=None)
+        _emit("claude", "Claude looked at the table camera: " + (", ".join(
+            f"{o['name']} at ({o['x']:+.0f}, {o['y']:.0f}) cm" for o in out) or "nothing beyond the tracked objects"),
+            big, {"type": "scan", "found": out})
+    except Exception as e:
+        SCAN["error"] = str(e)[:200]
+        logging.warning("scan failed: %s", e)
+    finally:
+        SCAN.update(busy=False, t=time.time())
 
 
 CHAT = {"msgs": [], "busy": False, "session": None, "model": "sonnet", "proc": None, "n": 0}
@@ -433,6 +497,7 @@ def camera_loop():
                                 objs = objs + [{"label": "orange ball", "x": on["x"], "y": on["y"], "on": on["label"],
                                                 "z": vision.SURFACE_HEIGHT_CM[on["label"]], "box": on["box"]}]
                         now = time.time()
+                        LIVE["table_rgb"] = imgs["table"]
                         WORLD.see_known(objs, now)
                         r = LIVE.get("robot")
                         clear_view = UNKNOWN["on"] and r is not None and r["tip"][1] < 13.0  # folded back, not over the mat
@@ -711,6 +776,11 @@ class Handler(BaseHTTPRequestHandler):
                 CHAT["model"] = body["model"]
                 chat_add("system", f"model: {CHAT['model']}")
             return self.js({"ok": True})
+        if self.path == "/api/scan":
+            if not SCAN["busy"]:
+                SCAN.update(busy=True, error=None)
+                threading.Thread(target=scan_table, daemon=True).start()
+            return self.js({"ok": True})
         if self.path == "/api/world/rename":
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
@@ -761,6 +831,8 @@ class Handler(BaseHTTPRequestHandler):
             import elrobot_mcp
             cfg = json.loads(mcp_config().read_text())
             return self.js({"tools": elrobot_mcp.TOOLS, "instructions": elrobot_mcp.INSTRUCTIONS, "config": cfg})
+        if p == "/api/scan":
+            return self.js({k: SCAN[k] for k in ("busy", "error", "t", "found")})
         if p == "/api/version":  # the page reloads itself when this changes (page files edited / server restarted)
             v = max([STARTED] + [f.stat().st_mtime for f in WEB.glob("*") if f.is_file()])
             return self.js({"v": v})
@@ -794,7 +866,11 @@ def story_loop():
                 if d.get("type") == "measured" and e["t"] not in done:
                     done.add(e["t"])
                     WORLD.measured(d["label"], d["table"], d["measured"])
-            LIVE["story"] = story(evs)
+            st = story(evs)
+            r = LIVE.get("robot")
+            if st["held"] and r is not None and r["gripper"] > 70:  # the jaws are open: nothing is held, whatever the log says
+                st["held"] = None
+            LIVE["story"] = st
         except Exception as e:  # never let a bad log line stop the page
             LIVE["info"] = f"story error: {e}"
         time.sleep(0.3)
@@ -843,6 +919,7 @@ def main():
 
         real = cv2.imread(str(vision.ROOT / "snapshots/look_table.jpg"))
         real = cv2.cvtColor(real, cv2.COLOR_BGR2RGB) if real is not None else None
+        LIVE["table_rgb"] = real
         rng = np.random.default_rng(1)
 
         def sim_objects():
