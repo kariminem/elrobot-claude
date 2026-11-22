@@ -976,6 +976,10 @@ def story_loop():
             st = story(evs)
             LIVE["last_event_t"] = max((e["t"] for e in evs[-5:]), default=0.0)
             r = LIVE.get("robot")
+            quiet = time.time() - LIVE["last_event_t"]
+            at_home = r is not None and r["tip"][1] < 10.5 and r["tip"][2] > 12.0
+            if st["task"] and not st["t_end"] and ((at_home and quiet > 8) or quiet > 60):
+                st = story([])  # a task that never ended (stopped, crashed, chat steps): it is over, start clean
             if st["held"] and r is not None and r["gripper"] > 70:  # the jaws are open: nothing is held, whatever the log says
                 st["held"] = None
             LIVE["story"] = st

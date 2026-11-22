@@ -87,6 +87,15 @@ def station_log() -> Path:
     raise RuntimeError("can't find NormaCore Station's log (is Station running?): set ELROBOT_STATION_LOG to its path")
 
 
+def _task_end_count() -> int:
+    """How many task ends the trace holds (to know whether a task logged its own end)."""
+    f = vision.TRACE_DIR / "events.jsonl"
+    try:
+        return f.read_text().count('"type": "task_end"') if f.exists() else 0
+    except OSError:
+        return 0
+
+
 def load_env():
     """config/hardware.env, each value overridable from the environment as ELROBOT_<NAME> (e.g.
     ELROBOT_FOLLOWER_SERIAL), so the public MCP package works on other people's arms."""
@@ -888,7 +897,7 @@ class Arm:
         return (f"PLACED at ({p[0]:+.1f}, {p[1]:.1f}) cm in {time.time() - t0:.0f} s. Call look to verify.\n"
                 + self.describe(await self.read()))
 
-    async def put_ball_on(self, target: str = "rubiks cube", target_height_cm: float = 5.7) -> str:
+    async def _put_ball_on(self, target: str = "rubiks cube", target_height_cm: float = 5.7) -> str:
         """Put the orange ball ON TOP of an object, using BOTH cameras: the table camera gives the rough position,
         the gripper camera (pointing straight down above it) confirms and corrects it before setting the ball down."""
         t0 = time.time()
@@ -990,6 +999,24 @@ class Arm:
         return f"{verdict}\nTOTAL {time.time() - t0:.0f} s"
 
     async def put_ball_in_mug(self, mug: str = "white mug", mug_height_cm: float = 10.0, survey=True) -> str:
+        return await self._ended(self._put_ball_in_mug(mug, mug_height_cm, survey))
+
+    async def put_ball_on(self, target: str = "rubiks cube", target_height_cm: float = 5.7) -> str:
+        return await self._ended(self._put_ball_on(target, target_height_cm))
+
+    async def _ended(self, coro) -> str:
+        """Run a task and make sure the dashboard sees it end, also when it stops early (FAILED ...): a task that
+        never ends kept the dashboard's phase timer counting."""
+        t0 = time.time()
+        n0 = _task_end_count()
+        res = await coro
+        if _task_end_count() == n0:
+            first = res.split(":")[0].split()[0] if res.strip() else "FAILED"
+            vision.trace("task", f"done in {time.time() - t0:.0f} s: {res.splitlines()[0]}",
+                         data={"type": "task_end", "verdict": first, "seconds": round(time.time() - t0, 1)})
+        return res
+
+    async def _put_ball_in_mug(self, mug: str = "white mug", mug_height_cm: float = 10.0, survey=True) -> str:
         t0 = time.time()
         vision.trace("task", f"TASK: put the orange ball in the {mug}", data={"type": "task_start", "task": f"ball → {mug}"})
         # 1) the table camera finds the mug (by its handle, ±2.5 cm, worse at the edges); the GRIPPER camera, empty and
